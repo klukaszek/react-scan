@@ -3,9 +3,8 @@ import type * as React from 'react';
 import { instrument, type Render } from './instrumentation/index';
 import {
     type ActiveOutline,
-    flushOutlines,
+    flushOutlinesGL,
     getOutline,
-    drawTriangle,
     drawOutline,
     type PendingOutline,
 } from './web/outline';
@@ -190,8 +189,8 @@ export const start = () => {
             }
 
             requestAnimationFrame(() => {
-                flushOutlines(ctx, new Map(), toolbar);
-                drawOutline(gl_ctx);
+                flushOutlinesGL(gl_ctx, new Map(), toolbar);
+                //drawOutline(gl_ctx);
             });
         },
         onCommitFinish() {

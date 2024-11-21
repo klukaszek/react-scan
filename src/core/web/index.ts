@@ -56,26 +56,121 @@ export const createOverlay = () => {
 
 // End of original createOverlay function using 2D canvas
 
-// Vertex Shader
-const vertexShaderSource = `#version 300 es
-in vec2 a_position;
+//// Vertex Shader
+//const outlineVertexShaderSource = `
+//    attribute vec2 a_position;
+//    attribute vec4 a_color;
+//    uniform vec2 u_resolution;
+//    varying vec4 v_color;
+//
+//    void main() {
+//        vec2 clipSpace = (a_position / u_resolution) * 2.0 - 1.0;
+//        gl_Position = vec4(clipSpace.x, -clipSpace.y, 0, 1);
+//        v_color = a_color;
+//    }
+//`;
+//
+//const outlineFragShaderSource = `
+//    precision mediump float;
+//    varying vec4 v_color;
+//
+//    void main() {
+//        gl_FragColor = v_color;
+//    }
+//`;
 
-void main() {
-    gl_Position = vec4(a_position, 0.0, 1.0);
-}`;
+const outlineVertexShaderSource = `
+    // Vertex shader
+    attribute vec2 a_position;
+    uniform vec4 u_color;
+    uniform vec2 u_resolution;
+    varying vec4 v_color;
+    varying vec2 v_position;
 
-// Fragment Shader
-const fragmentShaderSource = `#version 300 es
-precision mediump float;
-out vec4 fragColor;
+    void main() {
+        // Pass through the position and color
+        gl_Position = vec4(a_position, 0, 1);
 
-void main() {
-    fragColor = vec4(115.0 / 255.0, 97.0 / 255.0, 230.0 / 255.0, 0.5);
-}`;
+        v_position = vec2(a_position.x, -a_position.y);
+        v_color = u_color;
+    }
+`;
+
+const outlineFragShaderSource = `
+    precision mediump float;
+    varying vec4 v_color;
+    varying vec2 v_position;
+    uniform vec2 u_resolution;
+    uniform vec4 u_rect;  // x, y, width, height in pixels
+
+    float roundedRectSDF(vec2 pos, vec2 rect, vec2 size, float radius) {
+        vec2 d = abs(pos - rect) - size + vec2(radius);
+        return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - radius;
+    }
+
+    void main() {
+        // Convert position to pixels
+        vec2 pixelPos = (v_position + 1.0) * 0.5 * u_resolution;
+        
+        // Calculate rect center and size
+        vec2 rectCenter = u_rect.xy + u_rect.zw * 0.5;
+        vec2 rectSize = u_rect.zw * 0.5;
+        
+        // Calculate SDF
+        float distance = roundedRectSDF(pixelPos, rectCenter, rectSize, 4.0);
+        
+        // Edge width and smoothing
+        float edgeWidth = 2.0;
+        float smoothing = 0.0;
+        
+        // Calculate alpha based on distance
+        float alpha = 1.0 - smoothstep(0.0, edgeWidth + smoothing, abs(distance));
+        
+        if (alpha > 0.0) {
+            gl_FragColor = vec4(v_color.rgb, v_color.a * alpha);
+        } else {
+            discard;
+        }
+    }
+`;
+
+// Text vertex shader
+const textVertexShaderSource = `
+    attribute vec2 a_position;
+    attribute vec2 a_texCoord;
+    uniform vec2 u_resolution;
+    uniform vec2 u_position;   // Position of the text
+    uniform vec2 u_scale;      // Scale of the text
+    varying vec2 v_texCoord;
+    
+    void main() {
+        vec2 position = u_position + (a_position * u_scale);
+        vec2 clipSpace = (position / u_resolution) * 2.0 - 1.0;
+        gl_Position = vec4(clipSpace * vec2(1, -1), 0, 1);
+        v_texCoord = a_texCoord;
+    }
+`;
+
+// Text fragment shader
+const textFragmentShaderSource = `
+    precision mediump float;
+    uniform sampler2D u_texture;
+    uniform vec4 u_color;
+    varying vec2 v_texCoord;
+    
+    void main() {
+        float alpha = texture2D(u_texture, v_texCoord).r;
+        gl_FragColor = vec4(u_color.rgb, u_color.a * alpha);
+    }
+`;
+
 
 export interface WebGLContext {
     gl: WebGL2RenderingContext;
-    program: WebGLProgram;
+    programs: {
+        outline: WebGLProgram;
+        text: WebGLProgram;
+    };
 }
 
 // Create a WebGL shader from the source code.
@@ -121,11 +216,19 @@ export const createGLOverlay = () => {
     document.documentElement.appendChild(canvas);
 
     const gl = canvas.getContext('webgl2', { premultipliedAlpha: false, alpha: true })!;
-    const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource)!;
-    const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource)!;
-    const program = createProgram(gl, vertexShader, fragmentShader)!;
+    const outlineVS = createShader(gl, gl.VERTEX_SHADER, outlineVertexShaderSource)!;
+    const outlineFS = createShader(gl, gl.FRAGMENT_SHADER, outlineFragShaderSource)!;
+    const outlineProg = createProgram(gl, outlineVS, outlineFS)!;
 
-    const context = { gl, program };
+    const textVS = createShader(gl, gl.VERTEX_SHADER, textVertexShaderSource)!;
+    const textFS = createShader(gl, gl.FRAGMENT_SHADER, textFragmentShaderSource)!;
+    const textProg = createProgram(gl, textVS, textFS)!;
+
+    const context = { gl } as WebGLContext;
+    context.programs = {
+        outline: outlineProg,
+        text: textProg,
+    };
 
     if (!gl) {
         console.error('WebGL not supported');
