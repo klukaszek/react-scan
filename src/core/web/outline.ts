@@ -47,59 +47,22 @@ const quad_vertices = [
     1, 1
 ];
 
-const textPositions = new Float32Array([
-    0, 0,
-    1, 0,
-    0, 1,
-    1, 1,
-]);
+const componentUpdateMap = new Map<string, number>();
 
-const textCoords = new Float32Array([
-    0, 0,
-    1, 0,
-    0, 1,
-    1, 1,
-]);
+// Helper to reset the map during idle periods
+const resetUpdateMapOnIdle = () => {
+    const onIdle = () => {
 
-const createTextTexture = (gl: WebGLRenderingContext, text: string) => {
-    const textCanvas = document.createElement('canvas');
-    const ctx = textCanvas.getContext('2d')!;
+        
 
-    ctx.font = `10px arial`;
-    const textMetrics = ctx.measureText(text);
-
-    textCanvas.width = textMetrics.width;
-    textCanvas.height = 16;
-
-    ctx.font = `10px arial`;
-    ctx.textBaseline = 'top';
-    ctx.fillStyle = 'white';
-    ctx.fillText(text, -text.length / 2, -text.length / 2);
-
-    const texture: WebGLTexture = gl.createTexture()!;
-
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texImage2D(
-        gl.TEXTURE_2D,        // target
-        0,                    // level
-        gl.RGBA,             // internalformat
-        textCanvas.width,     // width
-        textCanvas.height,    // height
-        0,                    // border
-        gl.RGBA,             // format
-        gl.UNSIGNED_BYTE,    // type
-        ctx.getImageData(0, 0, textCanvas.width, textCanvas.height).data   // pixels
-    );
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-    return {
-        WebGLTexture: texture,
-        width: textCanvas.width,
-        height: textCanvas.height
+        componentUpdateMap.clear();
+        requestIdleCallback(onIdle);
     };
-}
+    requestIdleCallback(onIdle);
+};
+
+// Start watching for idle frames
+//resetUpdateMapOnIdle();
 
 export const getOutlineKey = (outline: PendingOutline): string => {
     return `${outline.rect.top}-${outline.rect.left}-${outline.rect.width}-${outline.rect.height}`;
@@ -109,7 +72,7 @@ const rectCache = new Map<HTMLElement, { rect: DOMRect; timestamp: number }>();
 
 export const getRect = (domNode: HTMLElement): DOMRect | null => {
     const cached = rectCache.get(domNode);
-    if (cached && cached.timestamp > performance.now() - DEFAULT_THROTTLE_TIME) {
+    if (cached && cached.timestamp > performance.now() - 128) {
         return cached.rect;
     }
 
@@ -125,10 +88,10 @@ export const getRect = (domNode: HTMLElement): DOMRect | null => {
     const rect = domNode.getBoundingClientRect();
 
     const isVisible =
-        rect.top >= 0 &&
+        rect.top >= -30 &&
         rect.left >= 0 &&
-        rect.bottom <= window.innerHeight &&
-        rect.right <= window.innerWidth;
+        rect.bottom <= window.innerHeight + 30 &&
+        rect.right <= window.innerWidth + 30;
 
     if (!isVisible || !rect.width || !rect.height) {
         return null;
@@ -227,8 +190,7 @@ export const flushOutlinesGL = (
     const firstOutlines = ReactScanInternals.scheduledOutlines;
     ReactScanInternals.scheduledOutlines = [];
 
-    //requestAnimationFrame(() => {
-    recalcOutlines();
+    //recalcOutlines();
     void (async () => {
         const secondOutlines = ReactScanInternals.scheduledOutlines;
         ReactScanInternals.scheduledOutlines = [];
@@ -262,7 +224,6 @@ export const flushOutlinesGL = (
             flushOutlinesGL(ctx, newPreviousOutlines, toolbar);
         }
     })();
-    //});
 };
 
 export const paintOutlineGL = (
@@ -282,9 +243,13 @@ export const paintOutlineGL = (
             (activeOutline) => getOutlineKey(activeOutline.outline) === key,
         );
 
-        let count = outline.renders.reduce((acc, render) => acc + render.count, 0);
+        // Update the component's update count in our map
+        const currentCount = componentUpdateMap.get(key) || 0;
+        componentUpdateMap.set(key, currentCount + 1);
+        
         const maxRenders = ReactScanInternals.options.maxRenders ?? 100;
-        const t = Math.min(count / maxRenders, 1);
+        const updateCount = componentUpdateMap.get(key) || 0;
+        const t = Math.min(updateCount / maxRenders, 1);
 
         const color = {
             r: Math.round(START_COLOR.r + t * (END_COLOR.r - START_COLOR.r)),
@@ -320,18 +285,69 @@ export const paintOutlineGL = (
     });
 };
 
+// Helper to create a text canvas
+function createTextCanvas(text: string, color = 'white') {
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d')!;
+    context.font = `{MONO_FONT} 16px`;
+    const textMetrics = context.measureText(text);
+    canvas.width = Math.ceil(textMetrics.width);
+    canvas.height = Math.ceil(parseInt(context.font, 10) * 1.2); // Account for line height
+    context.font = `{MONO_FONT} 16px`;
+    context.fillStyle = 'transparent';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = color;
+    context.textBaseline = 'top';
+    context.fillText(text, 0, 0);
+    return canvas;
+}
+
 export const fadeOutOutlineGL = (
     ctx: WebGLContext
 ) => {
     const { gl, programs } = ctx;
     const { activeOutlines } = ReactScanInternals;
 
+    if (!activeOutlines.length) {
+        animationFrameId = null;
+
+        console.log('Total num components updated:', componentUpdateMap.size);
+        console.log('Total num rects in cache:', rectCache.size);
+        
+        // Reset the maps on idle
+        componentUpdateMap.clear();
+        rectCache.clear();
+
+        console.log('Maps cleared');
+
+        return;
+    }
+
+    gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
     gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    gl.validateProgram(programs.outline);
+    if (!gl.getProgramParameter(programs.outline, gl.VALIDATE_STATUS)) {
+        console.error('Program validation failed:', gl.getProgramInfoLog(programs.outline));
+        return;
+    }
+
+    gl.useProgram(programs.outline);
+    if (!gl.getProgramParameter(programs.outline, gl.LINK_STATUS)) {
+        console.error('Program link error:', gl.getProgramInfoLog(programs.outline));
+        return;
+    }
 
     const positionLocation = gl.getAttribLocation(programs.outline, 'a_position');
-    const colorLocation = gl.getUniformLocation(programs.outline, 'u_color');
+    const colorLocation = gl.getAttribLocation(programs.outline, 'a_color');
+    const rectLocation = gl.getAttribLocation(programs.outline, 'a_rect');
     const resolutionLocation = gl.getUniformLocation(programs.outline, 'u_resolution');
-    const rectLocation = gl.getUniformLocation(programs.outline, 'u_rect');
+
+    if (positionLocation === -1 || colorLocation === -1 || rectLocation === -1) {
+        console.error('Failed to get attribute locations');
+        return;
+    }
 
     gl.uniform2f(resolutionLocation, gl.canvas.width, gl.canvas.height);
 
@@ -342,58 +358,155 @@ export const fadeOutOutlineGL = (
     gl.enableVertexAttribArray(positionLocation);
     gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
 
-    gl.useProgram(programs.outline);
+    // Create instance data buffers
+    const colorBuffer = gl.createBuffer();
+    const rectBuffer = gl.createBuffer();
 
-    // Draw each rectangle using the same quad
-    for (let i = activeOutlines.length - 1; i >= 0; i--) {
-        const activeOutline = activeOutlines[i];
-        if (!activeOutline) continue;
+    // Prepare instance data
+    const colorData = new Float32Array(activeOutlines.length * 4);
+    const rectData = new Float32Array(activeOutlines.length * 4);
 
-        const { outline, frame, totalFrames, color, text } = activeOutline;
+    // Fill instance data
+    activeOutlines.forEach((activeOutline, i) => {
+        if (!activeOutline) return;
+
+        const { outline, frame, totalFrames, color } = activeOutline;
         const { rect } = outline;
         const unstable = isOutlineUnstable(outline);
 
-        // Update rect if needed
-        if (outline) {
-            const newRect = getRect(outline.domNode);
-            if (newRect) {
-                outline.rect = newRect;
-            }
-        }
+        //// Update rect if needed
+        //if (outline) {
+        //    const newRect = getRect(outline.domNode);
+        //    if (newRect) {
+        //        outline.rect = newRect;
+        //    }
+        //}
 
         const alphaScalar = unstable ? 0.8 : 0.2;
         activeOutline.alpha = alphaScalar * (1 - frame / totalFrames);
 
-        // Set color uniform
-        const r = unstable ? color.r / 255 : 255 / 255;
-        const g = unstable ? color.g / 255 : 25 / 255;
-        const b = unstable ? color.b / 255 : 115 / 255;
-        const a = activeOutline.alpha;
-        
-        // Set color uniform
-        gl.uniform4f(colorLocation, r, g, b, a);
+        // Set color data
+        const offset = i * 4;
+        colorData[offset] = unstable ? color.r / 255 : 1.0;
+        colorData[offset + 1] = unstable ? color.g / 255 : 25 / 255;
+        colorData[offset + 2] = unstable ? color.b / 255 : 115 / 255;
+        colorData[offset + 3] = activeOutline.alpha;
 
-        // Set rectangle dimensions uniform
-        gl.uniform4f(rectLocation, rect.x, rect.y, rect.width, rect.height);
-
-        // Draw quad
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-
-        // WE SHOULD DRAW TEXT HERE
-        // -------------------------
+        // Set rect data
+        rectData[offset] = rect.x;
+        rectData[offset + 1] = rect.y;
+        rectData[offset + 2] = rect.width;
+        rectData[offset + 3] = rect.height;
 
         activeOutline.frame++;
-        if (activeOutline.frame > activeOutline.totalFrames) {
+    });
+
+    // Upload color data
+    gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, colorData, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(colorLocation);
+    gl.vertexAttribPointer(colorLocation, 4, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(colorLocation, 1);
+
+    // Upload rect data
+    gl.bindBuffer(gl.ARRAY_BUFFER, rectBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, rectData, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(rectLocation);
+    gl.vertexAttribPointer(rectLocation, 4, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(rectLocation, 1);
+
+    //Draw all instances
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, activeOutlines.length);
+
+    // Clean up expired outlines
+    for (let i = activeOutlines.length - 1; i >= 0; i--) {
+        if (activeOutlines[i].frame > activeOutlines[i].totalFrames) {
             activeOutlines.splice(i, 1);
         }
     }
 
-    if (activeOutlines.length) {
-        animationFrameId = requestAnimationFrame(() => fadeOutOutlineGL(ctx));
-    } else {
-        animationFrameId = null;
-    }
+    gl.deleteBuffer(colorBuffer);
+    gl.deleteBuffer(rectBuffer);
+
+    animationFrameId = requestAnimationFrame(() => fadeOutOutlineGL(ctx));
 };
+
+//export const fadeOutOutlineGL = (
+//    ctx: WebGLContext
+//) => {
+//    const { gl, programs } = ctx;
+//    const { activeOutlines } = ReactScanInternals;
+//
+//    gl.clearColor(0, 0, 0, 0);
+//
+//    const positionLocation = gl.getAttribLocation(programs.outline, 'a_position');
+//    const colorLocation = gl.getUniformLocation(programs.outline, 'u_color');
+//    const resolutionLocation = gl.getUniformLocation(programs.outline, 'u_resolution');
+//    const rectLocation = gl.getUniformLocation(programs.outline, 'u_rect');
+//
+//    gl.uniform2f(resolutionLocation, gl.canvas.width, gl.canvas.height);
+//
+//    // Create and bind position buffer (reusable quad)
+//    const positionBuffer = gl.createBuffer();
+//    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+//    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(quad_vertices), gl.STATIC_DRAW);
+//    gl.enableVertexAttribArray(positionLocation);
+//    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+//
+//    gl.useProgram(programs.outline);
+//
+//    // Draw each rectangle using the same quad
+//    for (let i = activeOutlines.length - 1; i >= 0; i--) {
+//        const activeOutline = activeOutlines[i];
+//        if (!activeOutline) continue;
+//
+//        const { outline, frame, totalFrames, color, text } = activeOutline;
+//        const { rect } = outline;
+//        const unstable = isOutlineUnstable(outline);
+//
+//        // Update rect if needed
+//        if (outline) {
+//            const newRect = getRect(outline.domNode);
+//            if (newRect) {
+//                outline.rect = newRect;
+//            }
+//        }
+//
+//        const alphaScalar = unstable ? 0.8 : 0.2;
+//        activeOutline.alpha = alphaScalar * (1 - frame / totalFrames);
+//
+//        // Set color uniform
+//        const r = unstable ? color.r / 255 : 255 / 255;
+//        const g = unstable ? color.g / 255 : 25 / 255;
+//        const b = unstable ? color.b / 255 : 115 / 255;
+//        const a = activeOutline.alpha;
+//
+//        // Set color uniform
+//        gl.uniform4f(colorLocation, r, g, b, a);
+//
+//        // Set rectangle dimensions uniform
+//        gl.uniform4f(rectLocation, rect.x, rect.y, rect.width, rect.height);
+//
+//        // Draw quad
+//        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+//
+//        // WE SHOULD DRAW TEXT HERE
+//        // -------------------------
+//
+//        activeOutline.frame++;
+//        if (activeOutline.frame > activeOutline.totalFrames) {
+//            activeOutlines.splice(i, 1);
+//        }
+//    }
+//
+//    if (activeOutlines.length) {
+//        animationFrameId = requestAnimationFrame(() => fadeOutOutlineGL(ctx));
+//    } else {
+//        animationFrameId = null;
+//    }
+//};
 
 // Original code
 // ----------------

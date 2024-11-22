@@ -5,7 +5,6 @@ import {
     type ActiveOutline,
     flushOutlinesGL,
     getOutline,
-    drawOutline,
     type PendingOutline,
 } from './web/outline';
 import { createGLOverlay, createOverlay } from './web/index';

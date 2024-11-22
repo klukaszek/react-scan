@@ -56,43 +56,20 @@ export const createOverlay = () => {
 
 // End of original createOverlay function using 2D canvas
 
-//// Vertex Shader
-//const outlineVertexShaderSource = `
-//    attribute vec2 a_position;
-//    attribute vec4 a_color;
-//    uniform vec2 u_resolution;
-//    varying vec4 v_color;
-//
-//    void main() {
-//        vec2 clipSpace = (a_position / u_resolution) * 2.0 - 1.0;
-//        gl_Position = vec4(clipSpace.x, -clipSpace.y, 0, 1);
-//        v_color = a_color;
-//    }
-//`;
-//
-//const outlineFragShaderSource = `
-//    precision mediump float;
-//    varying vec4 v_color;
-//
-//    void main() {
-//        gl_FragColor = v_color;
-//    }
-//`;
-
 const outlineVertexShaderSource = `
-    // Vertex shader
     attribute vec2 a_position;
-    uniform vec4 u_color;
+    attribute vec4 a_color;
+    attribute vec4 a_rect;
     uniform vec2 u_resolution;
     varying vec4 v_color;
     varying vec2 v_position;
+    varying vec4 v_rect;  // Add this
 
     void main() {
-        // Pass through the position and color
         gl_Position = vec4(a_position, 0, 1);
-
         v_position = vec2(a_position.x, -a_position.y);
-        v_color = u_color;
+        v_color = a_color;
+        v_rect = a_rect;  // Pass rect data to fragment shader
     }
 `;
 
@@ -100,8 +77,8 @@ const outlineFragShaderSource = `
     precision mediump float;
     varying vec4 v_color;
     varying vec2 v_position;
+    varying vec4 v_rect;
     uniform vec2 u_resolution;
-    uniform vec4 u_rect;  // x, y, width, height in pixels
 
     float roundedRectSDF(vec2 pos, vec2 rect, vec2 size, float radius) {
         vec2 d = abs(pos - rect) - size + vec2(radius);
@@ -113,15 +90,15 @@ const outlineFragShaderSource = `
         vec2 pixelPos = (v_position + 1.0) * 0.5 * u_resolution;
         
         // Calculate rect center and size
-        vec2 rectCenter = u_rect.xy + u_rect.zw * 0.5;
-        vec2 rectSize = u_rect.zw * 0.5;
+        vec2 rectCenter = v_rect.xy + v_rect.zw * 0.5;
+        vec2 rectSize = v_rect.zw * 0.5;
         
         // Calculate SDF
         float distance = roundedRectSDF(pixelPos, rectCenter, rectSize, 4.0);
         
-        // Edge width and smoothing
-        float edgeWidth = 2.0;
-        float smoothing = 0.0;
+
+        float edgeWidth = 5.0;
+        float smoothing = 0.1;
         
         // Calculate alpha based on distance
         float alpha = 1.0 - smoothstep(0.0, edgeWidth + smoothing, abs(distance));
