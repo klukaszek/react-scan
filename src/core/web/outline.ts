@@ -53,7 +53,7 @@ const componentUpdateMap = new Map<string, number>();
 const resetUpdateMapOnIdle = () => {
     const onIdle = () => {
 
-        
+
 
         componentUpdateMap.clear();
         requestIdleCallback(onIdle);
@@ -190,7 +190,6 @@ export const flushOutlinesGL = (
     const firstOutlines = ReactScanInternals.scheduledOutlines;
     ReactScanInternals.scheduledOutlines = [];
 
-    //recalcOutlines();
     void (async () => {
         const secondOutlines = ReactScanInternals.scheduledOutlines;
         ReactScanInternals.scheduledOutlines = [];
@@ -232,8 +231,8 @@ export const paintOutlineGL = (
 ) => {
     return new Promise<void>((resolve) => {
         const unstable = isOutlineUnstable(outline);
-        const totalFrames = unstable ? 144 : 60;
-        const alpha = 0.8;
+        const totalFrames = unstable ? 60 : 30;
+        const alpha = 1.0;
 
         const { options } = ReactScanInternals;
         options.onPaintStart?.(outline);
@@ -246,7 +245,7 @@ export const paintOutlineGL = (
         // Update the component's update count in our map
         const currentCount = componentUpdateMap.get(key) || 0;
         componentUpdateMap.set(key, currentCount + 1);
-        
+
         const maxRenders = ReactScanInternals.options.maxRenders ?? 100;
         const updateCount = componentUpdateMap.get(key) || 0;
         const t = Math.min(updateCount / maxRenders, 1);
@@ -313,7 +312,7 @@ export const fadeOutOutlineGL = (
 
         console.log('Total num components updated:', componentUpdateMap.size);
         console.log('Total num rects in cache:', rectCache.size);
-        
+
         // Reset the maps on idle
         componentUpdateMap.clear();
         rectCache.clear();
@@ -323,33 +322,54 @@ export const fadeOutOutlineGL = (
         return;
     }
 
+    const currentZoom = window.devicePixelRatio;
+    const screenOffsetX = window.scrollX;
+    const screenOffsetY = window.scrollY;
+
+    // Update canvas size to match device pixels
+    const canvasWidth = window.innerWidth * currentZoom;
+    const canvasHeight = window.innerHeight * currentZoom;
+    if (gl.canvas.width !== canvasWidth || gl.canvas.height !== canvasHeight) {
+        gl.canvas.width = canvasWidth;
+        gl.canvas.height = canvasHeight;
+    }
+    
+    // Set viewport and clear canvas
     gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
-
+    
+    // Validate program (We can probably remove this since we know the program is valid)
     gl.validateProgram(programs.outline);
     if (!gl.getProgramParameter(programs.outline, gl.VALIDATE_STATUS)) {
         console.error('Program validation failed:', gl.getProgramInfoLog(programs.outline));
         return;
     }
-
+    
+    // Assign program
     gl.useProgram(programs.outline);
     if (!gl.getProgramParameter(programs.outline, gl.LINK_STATUS)) {
         console.error('Program link error:', gl.getProgramInfoLog(programs.outline));
         return;
     }
-
+    
+    // Get attribute and uniform locations
     const positionLocation = gl.getAttribLocation(programs.outline, 'a_position');
     const colorLocation = gl.getAttribLocation(programs.outline, 'a_color');
     const rectLocation = gl.getAttribLocation(programs.outline, 'a_rect');
     const resolutionLocation = gl.getUniformLocation(programs.outline, 'u_resolution');
+    const outlineZoomLocation = gl.getUniformLocation(programs.outline, 'u_zoom');
+    const outlineViewportOffsetLocation = gl.getUniformLocation(programs.outline, 'u_offset');
 
     if (positionLocation === -1 || colorLocation === -1 || rectLocation === -1) {
         console.error('Failed to get attribute locations');
         return;
     }
-
+    
+    // Set resolution, zoom, and screen offset uniforms
     gl.uniform2f(resolutionLocation, gl.canvas.width, gl.canvas.height);
+    gl.uniform1f(outlineZoomLocation, currentZoom);
+    gl.uniform2f(outlineViewportOffsetLocation, screenOffsetX, screenOffsetY);
 
     // Create and bind position buffer (reusable quad)
     const positionBuffer = gl.createBuffer();
@@ -361,46 +381,13 @@ export const fadeOutOutlineGL = (
     // Create instance data buffers
     const colorBuffer = gl.createBuffer();
     const rectBuffer = gl.createBuffer();
-
-    // Prepare instance data
-    const colorData = new Float32Array(activeOutlines.length * 4);
-    const rectData = new Float32Array(activeOutlines.length * 4);
-
-    // Fill instance data
-    activeOutlines.forEach((activeOutline, i) => {
-        if (!activeOutline) return;
-
-        const { outline, frame, totalFrames, color } = activeOutline;
-        const { rect } = outline;
-        const unstable = isOutlineUnstable(outline);
-
-        //// Update rect if needed
-        //if (outline) {
-        //    const newRect = getRect(outline.domNode);
-        //    if (newRect) {
-        //        outline.rect = newRect;
-        //    }
-        //}
-
-        const alphaScalar = unstable ? 0.8 : 0.2;
-        activeOutline.alpha = alphaScalar * (1 - frame / totalFrames);
-
-        // Set color data
-        const offset = i * 4;
-        colorData[offset] = unstable ? color.r / 255 : 1.0;
-        colorData[offset + 1] = unstable ? color.g / 255 : 25 / 255;
-        colorData[offset + 2] = unstable ? color.b / 255 : 115 / 255;
-        colorData[offset + 3] = activeOutline.alpha;
-
-        // Set rect data
-        rectData[offset] = rect.x;
-        rectData[offset + 1] = rect.y;
-        rectData[offset + 2] = rect.width;
-        rectData[offset + 3] = rect.height;
-
-        activeOutline.frame++;
-    });
-
+    
+    const buffers = assembleOutlinesDrawArraysInstanced(activeOutlines);
+    if (!buffers) {
+        return;
+    }
+    const { rectData, colorData } = buffers;
+    
     // Upload color data
     gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, colorData, gl.DYNAMIC_DRAW);
@@ -432,6 +419,59 @@ export const fadeOutOutlineGL = (
 
     animationFrameId = requestAnimationFrame(() => fadeOutOutlineGL(ctx));
 };
+
+
+// Helper to assemble instance data for drawArraysInstanced
+const assembleOutlinesDrawArraysInstanced = (activeOutlines: ActiveOutline[]) => {
+    if (!activeOutlines.length) {
+        return;
+    }
+
+    // Prepare instance data
+    const rectData = new Float32Array(activeOutlines.length * 4);
+    const colorData = new Float32Array(activeOutlines.length * 4);
+
+    // Fill instance data
+    activeOutlines.forEach((activeOutline, i) => {
+        if (!activeOutline) return;
+
+        const { outline, frame, totalFrames, color } = activeOutline;
+        const { rect } = outline;
+        const unstable = isOutlineUnstable(outline);
+
+        // Update rect if needed
+        if (outline) {
+            const newRect = getRect(outline.domNode);
+            if (newRect) {
+                outline.rect = newRect;
+            }
+        }
+        
+        // Current position in the data arrays
+        const offset = i * 4;
+
+        // Set rect data
+        rectData[offset] = rect.x + window.scrollX;
+        rectData[offset + 1] = rect.y + window.scrollY;
+        rectData[offset + 2] = rect.width;
+        rectData[offset + 3] = rect.height;
+
+        const alphaScalar = unstable ? 1.0 : 0.2;
+        activeOutline.alpha = alphaScalar * (1 - frame / totalFrames);
+
+        // Set color data
+        colorData[offset] = unstable ? color.r / 255 : 1.0;
+        colorData[offset + 1] = unstable ? color.g / 255 : 25 / 255;
+        colorData[offset + 2] = unstable ? color.b / 255 : 115 / 255;
+        colorData[offset + 3] = activeOutline.alpha;
+        
+        // Increment frame to fade out
+        activeOutline.frame++;
+    });
+
+    return {rectData, colorData};
+}
+
 
 //export const fadeOutOutlineGL = (
 //    ctx: WebGLContext

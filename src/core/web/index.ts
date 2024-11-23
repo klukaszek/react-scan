@@ -76,9 +76,11 @@ const outlineVertexShaderSource = `
 const outlineFragShaderSource = `
     precision mediump float;
     varying vec4 v_color;
-    varying vec2 v_position;
-    varying vec4 v_rect;
+    varying vec2 v_position;  // NDC coordinates (-1 to 1)
+    varying vec4 v_rect;      // Rectangle in world space
     uniform vec2 u_resolution;
+    uniform vec2 u_offset;    // Scroll offset in world space
+    uniform float u_zoom;     // Device pixel ratio
 
     float roundedRectSDF(vec2 pos, vec2 rect, vec2 size, float radius) {
         vec2 d = abs(pos - rect) - size + vec2(radius);
@@ -86,25 +88,35 @@ const outlineFragShaderSource = `
     }
 
     void main() {
-        // Convert position to pixels
-        vec2 pixelPos = (v_position + 1.0) * 0.5 * u_resolution;
+        // 1. Convert NDC to screen space pixels
+        vec2 screenPos = (v_position + 1.0) * 0.5 * u_resolution;
         
-        // Calculate rect center and size
+        // 2. Convert screen space to world space
+        vec2 worldPos = screenPos / u_zoom;
+        
+        // 3. Apply scroll offset
+        worldPos += u_offset;
+        
+        // Calculate rect properties in world space
         vec2 rectCenter = v_rect.xy + v_rect.zw * 0.5;
         vec2 rectSize = v_rect.zw * 0.5;
         
-        // Calculate SDF
-        float distance = roundedRectSDF(pixelPos, rectCenter, rectSize, 4.0);
+        // Calculate distance in world space
+        float distance = roundedRectSDF(worldPos, rectCenter, rectSize, 3.0);
         
-
-        float edgeWidth = 5.0;
+        // Visual parameters
+        float edgeWidth = 1.5;
         float smoothing = 0.1;
         
-        // Calculate alpha based on distance
-        float alpha = 1.0 - smoothstep(0.0, edgeWidth + smoothing, abs(distance));
+        float outlineAlpha = 1.0 - smoothstep(0.0, edgeWidth + smoothing, abs(distance));
+        float fillAlpha = smoothstep(-3.0, 0.0, -distance);
         
-        if (alpha > 0.0) {
-            gl_FragColor = vec4(v_color.rgb, v_color.a * alpha);
+        vec4 fillColor = vec4(v_color.rgb, v_color.a * fillAlpha * 0.6);
+        vec4 outlineColor = vec4(v_color.rgb, v_color.a * outlineAlpha);
+        vec4 blendedColor = mix(fillColor, outlineColor, outlineAlpha);
+        
+        if (outlineAlpha > 0.0 || fillAlpha > 0.0) {
+            gl_FragColor = vec4(blendedColor.rgb, blendedColor.a);
         } else {
             discard;
         }
