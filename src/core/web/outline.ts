@@ -382,11 +382,12 @@ export const fadeOutOutlineGL = (
     const colorBuffer = gl.createBuffer();
     const rectBuffer = gl.createBuffer();
     
-    const buffers = assembleOutlinesDrawArraysInstanced(activeOutlines);
-    if (!buffers) {
+    // Assemble instance data arrays for drawArraysInstanced
+    const bufferData = assembleOutlinesDrawArraysInstanced(activeOutlines);
+    if (!bufferData) {
         return;
     }
-    const { rectData, colorData } = buffers;
+    const { rectData, colorData } = bufferData;
     
     // Upload color data
     gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
@@ -413,13 +414,13 @@ export const fadeOutOutlineGL = (
             activeOutlines.splice(i, 1);
         }
     }
-
+    
+    // Clean up
     gl.deleteBuffer(colorBuffer);
     gl.deleteBuffer(rectBuffer);
 
     animationFrameId = requestAnimationFrame(() => fadeOutOutlineGL(ctx));
 };
-
 
 // Helper to assemble instance data for drawArraysInstanced
 const assembleOutlinesDrawArraysInstanced = (activeOutlines: ActiveOutline[]) => {
