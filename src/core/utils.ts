@@ -34,15 +34,7 @@ export const getLabelText = (renders: Render[]) => {
   }
 
   const sortedComponents = Array.from(components.entries()).sort(
-    ([nameA, a], [nameB, b]) => {
-      if (a.trigger !== b.trigger) {
-        return a.trigger ? -1 : 1;
-      }
-      if (b.count !== a.count) {
-        return b.count - a.count;
-      }
-      return nameA.localeCompare(nameB);
-    },
+    ([, a], [, b]) => b.count - a.count,
   );
 
   const parts: string[] = [];
@@ -51,6 +43,7 @@ export const getLabelText = (renders: Render[]) => {
     if (count > 1) {
       text += ` ×${count}`;
     }
+
     if (trigger) {
       text = `🔥 ${text}`;
     }
@@ -60,7 +53,7 @@ export const getLabelText = (renders: Render[]) => {
     parts.push(text);
   }
 
-  labelText = parts.join(', ');
+  labelText = parts.join(' ');
 
   if (!labelText.length) return null;
   if (labelText.length > 20) {

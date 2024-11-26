@@ -146,36 +146,40 @@ void main() {
 }`;
 
 // Text vertex shader
-const textVertexShaderSource = `
-    attribute vec2 a_position;
-    attribute vec2 a_texCoord;
-    attribute vec4 a_instancePosition;
-    uniform vec2 u_resolution;
-    uniform vec2 u_scroll;
-    uniform float u_zoom;
+const textVertexShaderSource = `#version 300 es
+    in vec2 aPosition;       // Unit quad vertices
+    in vec2 aTexCoord;       // Texture coordinates
+    in vec2 aQuadPosition;   // Position of this instance
+    in vec2 aQuadSize;       // Size of this instance
+    uniform vec2 uResolution;     // Resolution of the canvas    
 
-    varying vec2 v_texCoord;
-
+    out vec2 vTexCoord;
+    
     void main() {
-        vec2 size = a_instancePosition.zw;
-        vec2 position = a_instancePosition.xy + (a_position * size);
-        position = position * u_zoom + u_scroll;
-        vec2 clipSpace = (position / u_resolution) * 2.0 - 1.0;
-        gl_Position = vec4(clipSpace * vec2(1, -1), 0, 1);
-        v_texCoord = a_texCoord;
+        // Scale and position the quad
+        vec2 scaled = aPosition * aQuadSize;
+        vec2 positioned = scaled + aQuadPosition;
+               
+        // Convert to clip space
+        vec2 clipSpace = (positioned / uResolution) * 2.0 - 1.0;
+        gl_Position = vec4(clipSpace.x, -clipSpace.y, 1, 1);
+        vTexCoord = aTexCoord;
     }
 `;
 
-// Modify fragment shader to use texture
-const textFragmentShaderSource = `
-    precision mediump float;
-    uniform sampler2D u_texture;
-    uniform float u_alpha;
-    varying vec2 v_texCoord;
-
+// Fragment shader for text rendering as a quad
+const textFragmentShaderSource = `#version 300 es
+    precision highp float;
+        
+    in vec2 vTexCoord;
+    uniform sampler2D uTexture;
+    uniform vec4 uColor;
+    
+    out vec4 fragColor;
+    
     void main() {
-        vec4 texColor = texture2D(u_texture, v_texCoord);
-        gl_FragColor = vec4(texColor.rgb, texColor.a * u_alpha);
+        fragColor = texture(uTexture, vTexCoord);
+        fragColor.a *= uColor.a;    
     }
 `;
 
@@ -227,9 +231,9 @@ const createFramebufferManager = (gl: WebGL2RenderingContext): FramebufferManage
 
     const createFramebuffer = (options: FramebufferOptions = {}): FramebufferObject => {
         const opts = { ...defaultOptions, ...options };
-        const { 
-            width, height, useDepthBuffer, minFilter, magFilter, 
-            wrapS, wrapT, internalFormat, format, type 
+        const {
+            width, height, useDepthBuffer, minFilter, magFilter,
+            wrapS, wrapT, internalFormat, format, type
         } = opts;
 
         // Create framebuffer
@@ -240,7 +244,7 @@ const createFramebufferManager = (gl: WebGL2RenderingContext): FramebufferManage
         // Create and setup texture
         const texture = gl.createTexture();
         if (!texture) throw new Error('Failed to create texture');
-        
+
         gl.bindTexture(gl.TEXTURE_2D, texture);
         gl.texImage2D(
             gl.TEXTURE_2D,
@@ -273,7 +277,7 @@ const createFramebufferManager = (gl: WebGL2RenderingContext): FramebufferManage
         if (useDepthBuffer) {
             depthBuffer = gl.createRenderbuffer()!;
             if (!depthBuffer) throw new Error('Failed to create depth buffer');
-            
+
             gl.bindRenderbuffer(gl.RENDERBUFFER, depthBuffer);
             gl.renderbufferStorage(
                 gl.RENDERBUFFER,
@@ -305,7 +309,7 @@ const createFramebufferManager = (gl: WebGL2RenderingContext): FramebufferManage
 
     const resizeFramebuffer = (fbo: FramebufferObject, width: number, height: number): void => {
         gl.bindFramebuffer(gl.FRAMEBUFFER, fbo.framebuffer);
-        
+
         // Resize texture
         gl.bindTexture(gl.TEXTURE_2D, fbo.texture);
         gl.texImage2D(
@@ -379,16 +383,16 @@ const createFramebufferManager = (gl: WebGL2RenderingContext): FramebufferManage
 const handleResize = (ctx: WebGLContext) => {
     const { gl, framebufferManager } = ctx;
     const canvas = gl.canvas;
-    
+
     // Update canvas size
     const displayWidth = Math.floor(canvas.width * window.devicePixelRatio);
     const displayHeight = Math.floor(canvas.height * window.devicePixelRatio);
-    
+
     if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
         canvas.width = displayWidth;
         canvas.height = displayHeight;
         gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
-        
+
         // Resize main framebuffer
         framebufferManager.resizeFramebuffer(
             framebufferManager.mainFramebuffer,
@@ -489,7 +493,7 @@ export const createGLOverlay = () => {
     // Create framebuffer manager
     const framebufferManager = createFramebufferManager(gl);
     console.log(framebufferManager);
-    
+
     // Create WebGL context object
     return {
         gl: gl,
@@ -506,17 +510,17 @@ export const createGLOverlay = () => {
 function createFullscreenQuad(gl: WebGL2RenderingContext): WebGLBuffer {
     const positions = new Float32Array([
         -1.0, -1.0,
-         1.0, -1.0,
-        -1.0,  1.0,
-         1.0,  1.0
+        1.0, -1.0,
+        -1.0, 1.0,
+        1.0, 1.0
     ]);
-    
+
     const buffer = gl.createBuffer();
     if (!buffer) throw new Error('Failed to create buffer');
-    
+
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
     gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
-    
+
     return buffer;
 }
 
@@ -524,30 +528,30 @@ function createFullscreenQuad(gl: WebGL2RenderingContext): WebGLBuffer {
 export function drawComposite(ctx: WebGLContext, sourceFBO: FramebufferObject): void {
     const { gl, programs } = ctx;
     const program = programs.framebuffer;
-    
+
     // Use the framebuffer program
     gl.useProgram(program);
-    
+
     // Ensure we have the quad buffer initialized
     if (!program.quadBuffer) {
         program.quadBuffer = createFullscreenQuad(gl);
         program.positionLocation = gl.getAttribLocation(program, 'position');
         program.textureLocation = gl.getUniformLocation(program, 'framebufferTexture')!;
     }
-    
+
     // Set up the vertex attributes
     gl.bindBuffer(gl.ARRAY_BUFFER, program.quadBuffer);
     gl.enableVertexAttribArray(program.positionLocation!);
     gl.vertexAttribPointer(program.positionLocation!, 2, gl.FLOAT, false, 0, 0);
-    
+
     // Bind the source framebuffer texture
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, sourceFBO.texture);
     gl.uniform1i(program.textureLocation!, 0);
-    
+
     // Draw the fullscreen quad
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    
+
     // Clean up state
     gl.disableVertexAttribArray(program.positionLocation!);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);

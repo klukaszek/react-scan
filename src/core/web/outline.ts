@@ -38,6 +38,8 @@ const DEFAULT_THROTTLE_TIME = 6; // 1 frame
 const START_COLOR = { r: 115, g: 97, b: 230 };
 const END_COLOR = { r: 185, g: 49, b: 115 };
 
+const pendingLabels = new Map<ActiveOutline, OutlineLabel>();
+
 // Create quad vertices for a single rectangle
 const quad_vertices = [
     -1, -1,
@@ -57,49 +59,65 @@ const componentUpdateMap = new Map<string, number>();
 const textureCache = new Map<string, TextureInfo>();
 
 // Create a texture from text using Canvas2D
-const createTextTexture = (gl: WebGLRenderingContext, text: string) => {
+// Create texture from text
+function createTextTexture(gl: WebGL2RenderingContext, text: string, fontSize: number = 48) {
 
+    if (textureCache.has(text)) {
+        const textureInfo = textureCache.get(text)!;
+        textureInfo.useCount++;
+        return textureInfo;
+    }
 
-    // Create temporary canvas for text rendering
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d')!;
+    const textCanvas = document.createElement('canvas');
+    const ctx = textCanvas.getContext('2d')!;
 
-    // Set font and measure text
-    ctx.font = '16px Arial';
+    // Set canvas size
+    ctx.font = `${fontSize}px ${MONO_FONT}`;
     const metrics = ctx.measureText(text);
-    
-    // Set canvas size to fit text (add some padding if needed)
-    canvas.width = Math.ceil(metrics.width);
-    canvas.height = 24; // Approximate height for 16px font
+    const width = Math.ceil(metrics.width);
+    const height = fontSize * 1.5;
 
-    // Set font again (canvas resize resets context properties)
-    ctx.font = '16px Arial';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = 'white';
-    
-    // Clear background to transparent
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    
+    textCanvas.width = width;
+    textCanvas.height = height;
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = 'transparent';
+    ctx.fillRect(0, 0, width, height);
+
     // Draw text
-    ctx.fillText(text, 0, canvas.height / 2);
+    ctx.font = `${fontSize}px ${MONO_FONT}`;
+    ctx.textBaseline = 'middle';
 
-    // Create and set up texture
-    const texture = gl.createTexture();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'black';
+    ctx.strokeText(text, 0, height / 2);
+
+    ctx.fillStyle = 'black';
+    ctx.fillText(text, 0, height / 2);
+
+    // Create texture
+    const texture = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
-    
+    gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        textCanvas
+    );
+
     // Set texture parameters
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
 
-    return {
-        texture,
-        width: canvas.width,
-        height: canvas.height
-    };
-};
+    const textureInfo = { texture, useCount: 1, width, height };
+    textureCache.set(text, textureInfo);
+
+    return textureInfo;
+}
+
 export const getOutlineKey = (outline: PendingOutline): string => {
     return `${outline.rect.top}-${outline.rect.left}-${outline.rect.width}-${outline.rect.height}`;
 };
@@ -334,6 +352,14 @@ export const fadeOutOutlineGL = (
         // Reset the maps on idle
         componentUpdateMap.clear();
         rectCache.clear();
+
+        textureCache.forEach((textureInfo) => {
+            if (textureInfo.useCount > 1) {
+                textureInfo.useCount--;
+                return;
+            }
+            gl.deleteTexture(textureInfo.texture);
+        });
         textureCache.clear();
 
         return;
@@ -361,17 +387,24 @@ export const fadeOutOutlineGL = (
 
     const outlineFBO = ctx.framebufferManager.mainFramebuffer;
     ctx.framebufferManager.bindFramebuffer(outlineFBO);
-    ctx.framebufferManager.clear();
+    gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    //ctx.framebufferManager.clear();
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
     // Draw outlines to framebuffer using the outline shader program
     drawOutlines(ctx, currentZoom, screenOffsetX, screenOffsetY);
-
     // Draw text to framebuffer using the text shader program
     if (activeOutlines.length > 0) {
-        drawText(ctx, currentZoom, screenOffsetX, screenOffsetY);
+        drawText(ctx, 16, currentZoom, screenOffsetX, screenOffsetY);
     }
-    ctx.framebufferManager.bindFramebuffer(null);
 
+    gl.disable(gl.BLEND);
+
+    ctx.framebufferManager.bindFramebuffer(null);
     drawComposite(ctx, outlineFBO);
 
     // Clean up expired outlines
@@ -385,132 +418,145 @@ export const fadeOutOutlineGL = (
     animationFrameId = requestAnimationFrame(() => fadeOutOutlineGL(ctx));
 };
 
-const drawText = (ctx: WebGLContext, currentZoom: number, screenOffsetX: number, screenOffsetY: number) => {
+const drawText = (ctx: WebGLContext, fontSize: number = 16, currentZoom: number, screenOffsetX: number, screenOffsetY: number) => {
     const { gl, programs } = ctx;
     const { activeOutlines } = ReactScanInternals;
 
     gl.useProgram(programs.text);
 
-    // Get locations
-    const positionLocation = gl.getAttribLocation(programs.text, 'a_position');
-    const texCoordLocation = gl.getAttribLocation(programs.text, 'a_texCoord');
-    const instancePositionLocation = gl.getAttribLocation(programs.text, 'a_instancePosition');
-    const resolutionLocation = gl.getUniformLocation(programs.text, 'u_resolution');
-    const scrollLocation = gl.getUniformLocation(programs.text, 'u_scroll');
-    const zoomLocation = gl.getUniformLocation(programs.text, 'u_zoom');
-    const alphaLocation = gl.getUniformLocation(programs.text, 'u_alpha');
-    const textureLocation = gl.getUniformLocation(programs.text, 'u_texture');
+    // Get attribute locations
+    const positionLocation = gl.getAttribLocation(programs.text, 'aPosition');
+    const texCoordLocation = gl.getAttribLocation(programs.text, 'aTexCoord');
+    const quadPositionLocation = gl.getAttribLocation(programs.text, 'aQuadPosition');
+    const quadSizeLocation = gl.getAttribLocation(programs.text, 'aQuadSize');
+    const resolutionLocation = gl.getUniformLocation(programs.text, 'uResolution');
+    const colorLocation = gl.getUniformLocation(programs.text, 'uColor');
 
     // Set uniforms
     gl.uniform2f(resolutionLocation, gl.canvas.width, gl.canvas.height);
-    gl.uniform2f(scrollLocation, screenOffsetX, screenOffsetY);
-    gl.uniform1f(zoomLocation, currentZoom);
 
-    // Create and set up position buffer
-    const quadVertices = new Float32Array([
-        0, 0,   // bottom left
-        1, 0,   // bottom right
-        0, 1,   // top left
-        1, 1    // top right
-    ]);
-
+    // Create unit quad position buffer (standard quad from 0 to 1)
     const positionBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, quadVertices, gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(positionLocation);
-    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+        0, 0,
+        1, 0,
+        0, 1,
+        0, 1,
+        1, 0,
+        1, 1,
+    ]), gl.STATIC_DRAW);
 
-    // Create and set up texture coordinate buffer
+    // Create texcoord buffer
     const texCoordBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
-    gl.bufferData(
-        gl.ARRAY_BUFFER,
-        new Float32Array([
-            0.0, 1.0,    // bottom left
-            1.0, 1.0,    // bottom right
-            0.0, 0.0,    // top left
-            1.0, 0.0     // top right
-        ]),
-        gl.STATIC_DRAW
-    );
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+        0, 0,
+        1, 0,
+        0, 1,
+        0, 1,
+        1, 0,
+        1, 1,
+    ]), gl.STATIC_DRAW);
+
+    // Set up position attribute (unit quad)
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.enableVertexAttribArray(positionLocation);
+    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(positionLocation, 0);
+
+    // Set up texcoord attribute
+    gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
     gl.enableVertexAttribArray(texCoordLocation);
     gl.vertexAttribPointer(texCoordLocation, 2, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(texCoordLocation, 0);
 
-    // Create a test texture (checkerboard pattern)
-    const createTestTexture = () => {
-        const texture = gl.createTexture();
-        gl.bindTexture(gl.TEXTURE_2D, texture);
 
-        // Create a 2x2 checkerboard pattern
-        const pixels = new Uint8Array([
-            255, 0, 0, 255,   // red
-            0, 255, 0, 255,   // green
-            0, 0, 255, 255,   // blue
-            255, 255, 0, 255  // yellow
-        ]);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 2, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-        
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-        return texture;
-    };
-
-    const testTexture = createTestTexture();
-
-    // Enable blending
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-
-    // Draw quads
     activeOutlines.forEach((activeOutline) => {
-        if (!activeOutline) return;
 
-        const { outline, frame, totalFrames } = activeOutline;
-        const { rect } = outline;
+        const { outline, text, color, alpha } = activeOutline;
 
-        const alpha = 1.0 - (frame / totalFrames);
-        gl.uniform1f(alphaLocation, alpha);
+        // Texture cache should only contain textures marked as unstable during the current frame
+        if (textureCache.has(text!)) {
+            const textInfo = textureCache.get(text!)!;
+            const { rect } = outline;
 
-        const width = Math.ceil(16);
-        const height = 16 * 1.5;
+            const quadPositionBuffer = gl.createBuffer();
+            let x = (rect.x + 5)
+            let y = rect.y - (fontSize * 0.7) - 1;
 
-        const instanceData = new Float32Array([
-            rect.x, rect.y - height, width, height
-        ]);
+            // Make sure text follows zoom and scroll offsets
+            x = x * currentZoom;
+            y = y * currentZoom;
 
-        const instanceBuffer = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, instanceData, gl.STATIC_DRAW);
-        gl.enableVertexAttribArray(instancePositionLocation);
-        gl.vertexAttribPointer(instancePositionLocation, 4, gl.FLOAT, false, 0, 0);
+            gl.bindBuffer(gl.ARRAY_BUFFER, quadPositionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+                x, y,
+                x, y,
+                x, y,
+                x, y,
+                x, y,
+                x, y,
+            ]), gl.STATIC_DRAW);
 
-        // Bind texture
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, testTexture);
-        gl.uniform1i(textureLocation, 0);
+            // Create quad size buffer
+            const quadSizeBuffer = gl.createBuffer();
+            const textWidth = textInfo.width * fontSize / textInfo.height;
+            const textHeight = fontSize;
+            gl.bindBuffer(gl.ARRAY_BUFFER, quadSizeBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+                textWidth, textHeight,
+                textWidth, textHeight,
+                textWidth, textHeight,
+                textWidth, textHeight,
+                textWidth, textHeight,
+                textWidth, textHeight,
+            ]), gl.STATIC_DRAW);
 
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+            // Set up quad position attribute
+            gl.bindBuffer(gl.ARRAY_BUFFER, quadPositionBuffer);
+            gl.enableVertexAttribArray(quadPositionLocation);
+            gl.vertexAttribPointer(quadPositionLocation, 2, gl.FLOAT, false, 0, 0);
+            gl.vertexAttribDivisor(quadPositionLocation, 1);
 
-        gl.disableVertexAttribArray(instancePositionLocation);
-        gl.deleteBuffer(instanceBuffer);
+            // Set up quad size attribute
+            gl.bindBuffer(gl.ARRAY_BUFFER, quadSizeBuffer);
+            gl.enableVertexAttribArray(quadSizeLocation);
+            gl.vertexAttribPointer(quadSizeLocation, 2, gl.FLOAT, false, 0, 0);
+            gl.vertexAttribDivisor(quadSizeLocation, 1);
 
-        
+            // Bind the texture
+            gl.bindTexture(gl.TEXTURE_2D, textInfo.texture);
+
+            const isImportant = isOutlineUnstable(outline);
+            const alphaScalar = isImportant ? 1.0 : 0.2;
+
+            const new_alpha = alphaScalar * alpha;
+            const fillAlpha = isImportant ? new_alpha * 0.1 : 0;
+
+            // Set color and alpha
+            gl.uniform4f(colorLocation, color.r / 255, color.g / 255, color.b / 255, alphaScalar * alpha);
+
+            // Draw the text
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+            gl.disableVertexAttribArray(quadPositionLocation);
+            gl.disableVertexAttribArray(quadSizeLocation);
+
+            gl.deleteBuffer(quadPositionBuffer);
+        }
     });
 
-    // Cleanup
     gl.disableVertexAttribArray(positionLocation);
     gl.disableVertexAttribArray(texCoordLocation);
+
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
     gl.deleteBuffer(positionBuffer);
     gl.deleteBuffer(texCoordBuffer);
-    gl.deleteTexture(testTexture);
 
-    const error = gl.getError();
-    if (error !== gl.NO_ERROR) {
-        console.error('WebGL error:', error);
-    }
+    gl.bindTexture(gl.TEXTURE_2D, null);
 };
 
 // GL code to bind necessary data to draw outlines in a single draw call
@@ -584,8 +630,6 @@ const drawOutlines = (ctx: WebGLContext, currentZoom: number, screenOffsetX: num
     gl.vertexAttribDivisor(rectLocation, 1);
 
     //Draw all instances
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, activeOutlines.length);
 
     // Clean up
@@ -618,8 +662,10 @@ const assembleOutlinesDrawArraysInstanced = (ctx: WebGLContext) => {
         const { rect } = outline;
         const unstable = isOutlineUnstable(outline);
 
-        if (!textureCache.has(text!)) {
-            //createOrUpdateTexture(gl, text!); // this will also cache the texture for future use
+        console.log(text!, 'unstable', unstable);
+
+        if (!textureCache.has(text!) && unstable) {
+            createTextTexture(gl, text!); // this will also cache the texture for future use
         }
 
         // Update rect if needed
